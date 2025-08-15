@@ -2,14 +2,23 @@ name: ner-backend
 channels:
   - defaults
   - conda-forge
+  - pytorch
 dependencies:
   - python=3.10
   - pip
+  - pytorch
+  - transformers
+  - python-dotenv
   - fastapi
   - uvicorn
   - sqlalchemy
   - sqlite
+  - python-jose
+  - passlib
+  - python-multipart
+  - pydantic[email]
   - pip:
     - gliner
-    - python-multipart
-    - pydantic[email]
+    - httpx
+    - aiofiles
+    - langdetect

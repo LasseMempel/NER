@@ -1,38 +1,42 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
+from fastapi.middleware.cors import CORSMiddleware
 import json
+import os
 
-from . import database, models, crud, schemas
+from . import database, models, schemas, crud, auth
+from .auth import get_current_user, create_access_token, authenticate_user
 
-# Initialize FastAPI
-app = FastAPI(title="NER Backend with GLiNER", version="0.1.0")
+app = FastAPI(title="Secure NER Backend", version="1.0.0")
 
-# Create tables
-models.Base.metadata.create_all(bind=database.engine)
+# CORS (optional)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Dependency
-def get_db():
-    db = database.SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-# Load GLiNER model (do this once at startup)
+# Load GLiNER on startup
 @app.on_event("startup")
-def load_gliner():
+async def load_gliner():
     global gliner
     from gliner import GLiNER
-    app.state.gliner = GLiNER.from_pretrained("urchade/gliner_small-v1.1")
+    model_path = "/app/gliner_model"
+    if os.path.exists(model_path):
+        app.state.gliner = GLiNER.from_pretrained(model_path)
+    else:
+        app.state.gliner = GLiNER.from_pretrained("knowledgator/gliner-x-large")
+    print("🟢 GLiNER x-large model loaded!")
 
-# Helper: Annotate text with entities
-def annotate_text(text: str, model) -> tuple:
-    predictions = model.predict_entities(text, labels=["person", "organization", "location", "date"], threshold=0.3)
+# Helper: Annotate text
+async def annotate_text(text: str, model) -> tuple:
+    predictions = model.predict_entities(text, labels=["person", "organization", "location", "date", "email", "phone"], threshold=0.3)
     entities = []
     annotated_text = text
     offset = 0
 
-    # Sort by start position to handle overlaps
     predictions.sort(key=lambda x: x['start'])
 
     for ent in predictions:
@@ -40,11 +44,9 @@ def annotate_text(text: str, model) -> tuple:
         end = ent['end'] + offset
         label = ent['label']
         conf = ent['score']
-
-        # Wrap entity in annotation
-        replacement = f"[{text[ent['start']:ent['end']]}]({label}:{conf:.2f})"
+        replacement = f"[{ent['text']}]({label}:{conf:.2f})"
         annotated_text = annotated_text[:start] + replacement + annotated_text[end:]
-        offset += len(replacement) - (ent['end'] - ent['start'])  # adjust offset
+        offset += len(replacement) - (ent['end'] - ent['start'])
 
         entities.append({
             "text": ent['text'],
@@ -56,25 +58,48 @@ def annotate_text(text: str, model) -> tuple:
 
     return annotated_text, entities
 
-# API Endpoint
+# Routes
+@app.post("/register", response_model=schemas.UserOut, status_code=201)
+async def register(user: schemas.UserCreate, db: Session = Depends(auth.get_db)):
+    if crud.get_user_by_email(db, user.email):
+        raise HTTPException(status_code=400, detail="Email already registered")
+    db_user = crud.create_user(db, user)
+    return db_user
+
+@app.post("/login", response_model=schemas.Token)
+async def login(credentials: schemas.UserLogin, db: Session = Depends(auth.get_db)):
+    user = authenticate_user(db, credentials.email, credentials.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    token = create_access_token(data={"sub": user.email})
+    return {"access_token": token, "token_type": "bearer"}
+
 @app.post("/ner", response_model=schemas.AnnotatedTextResponse)
-def run_ner(data: dict, db: Session = Depends(get_db)):
+async def run_ner(data: dict, db: Session = Depends(auth.get_db), user: models.User = Depends(get_current_user)):
     text = data.get("text")
-    if not text:
+    if not text or not text.strip():
         raise HTTPException(status_code=400, detail="No text provided")
 
     model = app.state.gliner
-    annotated_text, entities = annotate_text(text, model)
+    annotated_text, entities = await annotate_text(text, model)
 
-    db_record = crud.AnnotatedTextCreate(
+    saved = crud.create_annotated_text(
+        db=db,
         original_text=text,
         annotated_text=annotated_text,
-        entities=entities
+        entities=entities,
+        user_id=user.id
     )
-    saved = crud.create_annotated_text(db=db, data=db_record)
 
-    return saved
+    return {
+        "id": saved.id,
+        "original_text": saved.original_text,
+        "annotated_text": saved.annotated_text,
+        "entities": json.loads(saved.entities),
+        "user_id": saved.user_id,
+        "created_at": saved.created_at
+    }
 
 @app.get("/ner", response_model=list[schemas.AnnotatedTextResponse])
-def list_annotated_texts(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
-    return crud.get_annotated_texts(db, skip=skip, limit=limit)
+async def get_my_texts(db: Session = Depends(auth.get_db), user: models.User = Depends(get_current_user)):
+    return crud.get_annotated_texts(db, user.id)

@@ -2,7 +2,12 @@ __pycache__
 *.pyc
 *.db-journal
 .env
+.env.local
 .conda
-node_modules
-.dockerignore
 .DS_Store
+.git/
+.vscode/
+.pytest_cache/
+__pycache__/
+*.swp
+*.swo
