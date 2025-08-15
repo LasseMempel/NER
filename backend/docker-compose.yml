@@ -1,0 +1,10 @@
+version: '3.8'
+
+services:
+  ner-backend:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app/ner.db:/app/ner.db
+    restart: unless-stopped
